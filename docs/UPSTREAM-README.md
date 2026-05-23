@@ -31,28 +31,6 @@ The patch writes both during `gfx_v10_0_get_cu_info()`, guarded by `device == 0x
 
 ## Quick Start
 
-### Option 0: CachyOS one-liner (recommended)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/mikael2df-ux/bc250-40cu-unlock/main/install.sh | sudo bash
-sudo reboot
-```
-
-That's it. The installer:
-- Installs all dependencies (`dkms`, `base-devel`, `zstd`, `patch`, `linux-cachyos-headers`).
-- Sets up a pacman PostTransaction hook that **automatically rebuilds the DKMS module on every `linux-cachyos` kernel update** — no more manual rebuilds.
-- Downloads the matching CachyOS kernel source (needed because `linux-cachyos-headers` doesn't ship `drivers/gpu/drm/amd/`).
-- Builds and installs the patched `amdgpu` for the currently installed kernel.
-- Regenerates initramfs.
-
-Disable Secure Boot in UEFI first — the DKMS-built module is unsigned.
-
-After reboot, verify:
-```bash
-cat /sys/module/amdgpu/parameters/bc250_cc_write_mode   # expect: 3
-sudo dmesg | grep active_cu_number                      # expect: 40
-```
-
 ### Option 1: Build Script (any distro)
 
 ```bash

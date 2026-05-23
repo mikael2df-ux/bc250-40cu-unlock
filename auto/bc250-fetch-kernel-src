@@ -1,0 +1,100 @@
+#!/bin/bash
+# bc250-fetch-kernel-src — download & extract a CachyOS kernel tarball that
+# contains the full drivers/gpu/drm/amd/ subtree (which linux-cachyos-headers
+# does not ship). The bc250-amdgpu DKMS module needs that subtree to build.
+#
+# Version is taken from `pacman -Q linux-cachyos` by default, or from the
+# first positional argument (e.g. "7.0.9-1"), or from $BC250_KVER_PKG.
+#
+# The tarball is downloaded into /var/lib/bc250-amdgpu/kernel-src/ so the
+# pacman hook (which runs as root, with no useful $HOME) can find it later.
+#
+# Idempotent: if the matching directory already contains gfx_v10_0.c we just
+# print its path and exit 0.
+#
+# Usage:
+#   sudo bc250-fetch-kernel-src                  # version from pacman -Q
+#   sudo bc250-fetch-kernel-src 7.0.9-1          # explicit version
+#   sudo BC250_KVER_PKG=7.0.9-1 bc250-fetch-kernel-src
+
+set -euo pipefail
+
+if [[ "$(id -u)" != "0" ]]; then
+    exec sudo -E "$0" "$@"
+fi
+
+DEST_BASE="/var/lib/bc250-amdgpu/kernel-src"
+GH_BASE="https://github.com/CachyOS/linux/releases/download"
+
+log() { printf '[bc250-fetch] %s\n' "$*"; }
+die() { printf '[bc250-fetch] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ---- determine version ------------------------------------------------------
+PKGVER="${1:-${BC250_KVER_PKG:-}}"
+if [[ -z "${PKGVER}" ]]; then
+    if ! command -v pacman >/dev/null 2>&1; then
+        die "pacman not found and no version supplied"
+    fi
+    # pacman -Q linux-cachyos -> "linux-cachyos 7.0.9-1"
+    PKGVER="$(pacman -Q linux-cachyos 2>/dev/null | awk '{print $2}')"
+    [[ -n "${PKGVER}" ]] || die "linux-cachyos is not installed"
+fi
+
+# CachyOS release tags look like "cachyos-7.0.9-1"; the tarball inside is
+# named cachyos-7.0.9-1.tar.gz and unpacks to cachyos-7.0.9-1/.
+TAG="cachyos-${PKGVER}"
+TARBALL="${TAG}.tar.gz"
+URL="${GH_BASE}/${TAG}/${TARBALL}"
+
+mkdir -p "${DEST_BASE}"
+cd "${DEST_BASE}"
+
+EXTRACTED="${DEST_BASE}/${TAG}"
+SENTINEL="${EXTRACTED}/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c"
+
+if [[ -f "${SENTINEL}" ]]; then
+    log "already have ${EXTRACTED} (gfx_v10_0.c present) — nothing to do"
+    printf '%s\n' "${EXTRACTED}"
+    exit 0
+fi
+
+# ---- download ---------------------------------------------------------------
+if [[ ! -f "${TARBALL}" ]]; then
+    log "downloading ${URL}"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "${TARBALL}.part" "${URL}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "${TARBALL}.part" "${URL}"
+    else
+        die "neither curl nor wget is available"
+    fi
+    mv "${TARBALL}.part" "${TARBALL}"
+else
+    log "tarball ${TARBALL} already on disk; skipping download"
+fi
+
+# ---- extract ----------------------------------------------------------------
+log "extracting ${TARBALL}"
+rm -rf "${EXTRACTED}.partial"
+mkdir -p "${EXTRACTED}.partial"
+tar -xzf "${TARBALL}" -C "${EXTRACTED}.partial"
+
+# The archive may extract either as "cachyos-X.Y.Z-N/<tree>" or directly as
+# "<tree>" depending on how it was packed. Normalize.
+if [[ -d "${EXTRACTED}.partial/${TAG}" ]]; then
+    mv "${EXTRACTED}.partial/${TAG}" "${EXTRACTED}.tmp"
+    rm -rf "${EXTRACTED}.partial"
+else
+    mv "${EXTRACTED}.partial" "${EXTRACTED}.tmp"
+fi
+
+if [[ ! -f "${EXTRACTED}.tmp/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c" ]]; then
+    rm -rf "${EXTRACTED}.tmp"
+    die "extracted tree does not contain drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c"
+fi
+
+rm -rf "${EXTRACTED}"
+mv "${EXTRACTED}.tmp" "${EXTRACTED}"
+
+log "ready: ${EXTRACTED}"
+printf '%s\n' "${EXTRACTED}"

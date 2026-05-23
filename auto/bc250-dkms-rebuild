@@ -1,0 +1,90 @@
+#!/bin/bash
+# bc250-dkms-rebuild — invoked by the pacman PostTransaction hook after
+# linux-cachyos / linux-cachyos-headers are installed or upgraded.
+#
+# Pipeline:
+#   1. Read the new linux-cachyos package version from pacman.
+#   2. Make sure the matching kernel source tarball is on disk
+#      (download + extract via bc250-fetch-kernel-src).
+#   3. Run run-dkms-cachyos.sh against that exact kernel version, so the
+#      bc250-amdgpu module gets built for the kernel that was just installed,
+#      not the one that's currently running.
+#
+# Logs to /var/log/bc250-amdgpu/rebuild.log in addition to stdout/stderr so
+# that pacman transcripts stay readable but a full record is kept.
+
+set -euo pipefail
+
+LOG_DIR="/var/log/bc250-amdgpu"
+LOG_FILE="${LOG_DIR}/rebuild.log"
+mkdir -p "${LOG_DIR}"
+
+# tee everything below into the log file
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+log()   { printf '[bc250-dkms-rebuild %s] %s\n' "$(stamp)" "$*"; }
+
+log "=== start ==="
+
+if [[ "$(id -u)" != "0" ]]; then
+    log "must run as root"
+    exit 1
+fi
+
+# ---- discover kernel version & matching modules path ------------------------
+PKGVER="$(pacman -Q linux-cachyos 2>/dev/null | awk '{print $2}')"
+if [[ -z "${PKGVER}" ]]; then
+    log "linux-cachyos not installed; nothing to do"
+    exit 0
+fi
+log "linux-cachyos package version: ${PKGVER}"
+
+# linux-cachyos puts modules into /usr/lib/modules/<KVER>/, where KVER for
+# CachyOS looks like "7.0.9-1-cachyos". Derive it from what's on disk to
+# avoid hard-coding the suffix.
+KVER=""
+for d in /usr/lib/modules/*/; do
+    name="$(basename "${d%/}")"
+    # require build/ to exist (i.e. headers package installed for it)
+    if [[ "${name}" == "${PKGVER}"* ]] && [[ -d "${d}/build" ]]; then
+        KVER="${name}"
+        break
+    fi
+done
+
+if [[ -z "${KVER}" ]]; then
+    log "no /usr/lib/modules/${PKGVER}*/build found — linux-cachyos-headers missing or mismatched"
+    log "skipping DKMS rebuild; install matching headers and re-run /usr/local/bin/bc250-dkms-rebuild"
+    exit 0
+fi
+log "target KVER: ${KVER}"
+
+# ---- ensure source tree is on disk ------------------------------------------
+log "fetching kernel sources"
+/usr/local/bin/bc250-fetch-kernel-src "${PKGVER}"
+
+# ---- run the actual DKMS staging+build --------------------------------------
+SHARE_DIR="/usr/local/share/bc250-amdgpu"
+RUNNER="${SHARE_DIR}/run-dkms-cachyos.sh"
+
+if [[ ! -x "${RUNNER}" ]]; then
+    log "runner not found or not executable: ${RUNNER}"
+    exit 1
+fi
+
+log "running ${RUNNER} for ${KVER}"
+BC250_KVER="${KVER}" "${RUNNER}"
+
+# ---- regenerate initramfs so the patched amdgpu actually loads at boot ------
+if command -v dracut >/dev/null 2>&1 && [[ -d /etc/dracut.conf.d ]]; then
+    log "regenerating initramfs with dracut"
+    dracut --force --kver "${KVER}" || log "dracut returned non-zero"
+elif command -v mkinitcpio >/dev/null 2>&1; then
+    log "regenerating initramfs with mkinitcpio"
+    mkinitcpio -P || log "mkinitcpio returned non-zero"
+else
+    log "no dracut/mkinitcpio found; skipping initramfs regeneration"
+fi
+
+log "=== done ==="

@@ -1,0 +1,27 @@
+# /etc/pacman.d/hooks/95-bc250-amdgpu.hook
+#
+# After linux-cachyos / linux-cachyos-headers are installed or upgraded,
+# rebuild the bc250-amdgpu DKMS module against the *new* kernel.
+#
+# Why post-transaction and not pre-/post-Install on each package: we need
+# both the new kernel modules dir and the new headers in place at the same
+# time. Running once at the end of the transaction guarantees that.
+#
+# Priority 95 puts us after the dkms hook (which runs at 90) so AUTOINSTALL=yes
+# in dkms.conf has already had its (failing, due to missing amd/ sources)
+# attempt and we can re-run with our staged source tree.
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux-cachyos
+Target = linux-cachyos-headers
+
+[Action]
+Description = Rebuilding bc250-amdgpu DKMS module against the new linux-cachyos kernel...
+When = PostTransaction
+Exec = /usr/local/bin/bc250-dkms-rebuild
+Depends = dkms
+Depends = bash
+NeedsTargets
